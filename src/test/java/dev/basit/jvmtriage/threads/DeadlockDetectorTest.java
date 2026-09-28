@@ -36,6 +36,42 @@ class DeadlockDetectorTest {
             	- parking to wait for <0x00000000ffff0009> (a java.util.concurrent.SynchronousQueue)
             """;
 
+
+    // A real ReentrantLock deadlock, in the shape jcmd Thread.print actually emits.
+    // Note what is absent: no "locked <0x...>" line anywhere. The only record of who
+    // owns what is the trailing "Locked ownable synchronizers" block.
+    private static final String REENTRANT_LOCK_DEADLOCK = """
+            "Thread-A" #10 prio=5 tid=0x00007f0000000001 nid=0x1 waiting on condition
+               java.lang.Thread.State: WAITING (parking)
+            	at jdk.internal.misc.Unsafe.park(Native Method)
+            	- parking to wait for <0x00000000ffff0002> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+            	at com.example.Service.transfer(Service.java:42)
+
+               Locked ownable synchronizers:
+            	- <0x00000000ffff0001> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+
+            "Thread-B" #11 prio=5 tid=0x00007f0000000002 nid=0x2 waiting on condition
+               java.lang.Thread.State: WAITING (parking)
+            	at jdk.internal.misc.Unsafe.park(Native Method)
+            	- parking to wait for <0x00000000ffff0001> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+            	at com.example.Service.transfer(Service.java:42)
+
+               Locked ownable synchronizers:
+            	- <0x00000000ffff0002> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+            """;
+
+    // A thread that parks on a queue and owns nothing. "- None" must not be read as
+    // a held lock, or every idle pool thread becomes a spurious owner.
+    private static final String OWNS_NOTHING = """
+            "pool-1-thread-1" #12 prio=5 tid=0x00007f0000000003 nid=0x3 waiting on condition
+               java.lang.Thread.State: WAITING (parking)
+            	at jdk.internal.misc.Unsafe.park(Native Method)
+            	- parking to wait for <0x00000000ffff0009> (a java.util.concurrent.SynchronousQueue)
+
+               Locked ownable synchronizers:
+            	- None
+            """;
+
     @Test
     @DisplayName("parses thread name, state, held locks and awaited lock")
     void parsesThreadFacts() {
@@ -168,5 +204,31 @@ class DeadlockDetectorTest {
     void toleratesJunk() {
         assertTrue(ThreadDumpParser.parse("").isEmpty());
         assertTrue(ThreadDumpParser.parse("not a thread dump at all").isEmpty());
+    }
+
+    @Test
+    @DisplayName("finds a ReentrantLock deadlock, where ownership is only in the ownable block")
+    void findsReentrantLockDeadlock() {
+        List<ThreadInfo> threads = ThreadDumpParser.parse(REENTRANT_LOCK_DEADLOCK);
+
+        assertEquals(2, threads.size());
+        // Before the ownable block was parsed, both of these were empty: the waiting
+        // edge existed, the owning edge did not, and no cycle could form.
+        assertEquals(List.of("0x00000000ffff0001"), threads.get(0).locksHeld());
+        assertEquals(List.of("0x00000000ffff0002"), threads.get(1).locksHeld());
+
+        List<DeadlockDetector.Deadlock> found = DeadlockDetector.findDeadlocks(threads);
+        assertEquals(1, found.size());
+        assertEquals(2, found.get(0).cycle().size());
+    }
+
+    @Test
+    @DisplayName("\"- None\" in the ownable block is not a held lock")
+    void ownsNothingHoldsNoLocks() {
+        List<ThreadInfo> threads = ThreadDumpParser.parse(OWNS_NOTHING);
+
+        assertEquals(1, threads.size());
+        assertTrue(threads.get(0).locksHeld().isEmpty());
+        assertTrue(DeadlockDetector.findDeadlocks(threads).isEmpty());
     }
 }

@@ -33,6 +33,18 @@ public final class ThreadDumpParser {
     private static final Pattern LOCKED = Pattern.compile(
             "^\\s*-\\s+locked\\s+<(?<addr>0x[0-9a-fA-F]+)>.*$");
 
+    // A ReentrantLock's owner is never reported by "locked <0x...>". It appears only
+    // in this trailing section, so a dump where the contended locks are j.u.c. gives
+    // us the waiting edge and no owning edge — no cycle, and a clean bill of health
+    // for a real deadlock. Parsing it is what makes the j.u.c. case work at all.
+    private static final Pattern OWNABLE_HEADER = Pattern.compile(
+            "^\\s*Locked ownable synchronizers:\\s*$");
+
+    // Entries are bare addresses with no verb: "- <0x...> (a ...Sync)". "- None" has
+    // no address and so does not match.
+    private static final Pattern OWNABLE_ENTRY = Pattern.compile(
+            "^\\s*-\\s+<(?<addr>0x[0-9a-fA-F]+)>\\s*(?:\\(a (?<cls>[^)]+)\\))?\\s*$");
+
     private static final Pattern FRAME = Pattern.compile("^\\s*at\\s+(?<frame>\\S.*)$");
 
     private ThreadDumpParser() {}
@@ -40,6 +52,7 @@ public final class ThreadDumpParser {
     public static List<ThreadInfo> parse(String dump) {
         List<ThreadInfo> threads = new ArrayList<>();
         Builder current = null;
+        boolean inOwnable = false;
 
         for (String line : dump.split("\\R")) {
             if (line.startsWith("\"")) {
@@ -49,6 +62,7 @@ public final class ThreadDumpParser {
                         threads.add(current.build());
                     }
                     current = new Builder(header.group("name"), parseTid(header.group("tid")));
+                    inOwnable = false;
                     continue;
                 }
             }
@@ -57,7 +71,19 @@ public final class ThreadDumpParser {
             }
 
             Matcher m;
+            if (OWNABLE_HEADER.matcher(line).matches()) {
+                inOwnable = true;
+                continue;
+            }
+            if (inOwnable && (m = OWNABLE_ENTRY.matcher(line)).matches()) {
+                // Owning a synchronizer is the same fact as "locked" for the
+                // wait-for graph: this thread holds it, so others block behind it.
+                current.locksHeld.add(m.group("addr"));
+                continue;
+            }
+
             if ((m = STATE_LINE.matcher(line)).matches()) {
+                inOwnable = false;
                 current.state = m.group("state");
             } else if ((m = WAITING_TO_LOCK.matcher(line)).matches()) {
                 current.lockWaitedOn = m.group("addr");
@@ -70,6 +96,7 @@ public final class ThreadDumpParser {
             } else if ((m = LOCKED.matcher(line)).matches()) {
                 current.locksHeld.add(m.group("addr"));
             } else if ((m = FRAME.matcher(line)).matches()) {
+                inOwnable = false;
                 current.frames.add(m.group("frame"));
             }
         }

@@ -109,13 +109,17 @@ Exit codes: `0` analysed and clean, `1` deadlock found or dump unreadable, `2` u
 - Thread-dump parsing is deliberately tolerant. Unrecognised lines are skipped rather
   than rejected, because dumps arrive truncated by log rotation or pasted out of
   tickets, and refusing to parse one is worse than parsing what is there.
-- Deadlock detection covers monitors (`waiting to lock`) and `java.util.concurrent`
-  parking (`parking to wait for`). It finds cycles the JVM's own "Found one Java-level
-  deadlock" banner misses, including in dumps where that banner is absent entirely.
+- Deadlock detection covers monitors (`waiting to lock` / `locked`) and
+  `java.util.concurrent` locks (`parking to wait for`, with ownership read from the
+  trailing `Locked ownable synchronizers` block). That block matters: a `ReentrantLock`
+  owner is never reported by a `locked` line, so without parsing it a j.u.c. deadlock
+  yields a waiting edge, no owning edge, and no cycle — a real deadlock reported clean.
+  It finds cycles the JVM's own "Found one Java-level deadlock" banner misses, including
+  in dumps where that banner is absent entirely.
 
 ## Tests
 
-44 tests, 92% line / 82% branch coverage.
+46 tests, 92% line / 82% branch coverage.
 
 ```bash
 mvn test
