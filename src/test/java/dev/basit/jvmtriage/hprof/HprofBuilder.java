@@ -22,6 +22,7 @@ public final class HprofBuilder {
     private final DataOutputStream heapOut = new DataOutputStream(heap);
     private final int idSize;
     private long nextStringId = 1000;
+    private int heapPayloadOffset = -1;
 
     public HprofBuilder() {
         this(8);
@@ -181,6 +182,37 @@ public final class HprofBuilder {
         run(() -> heapOut.writeByte(b));
     }
 
+    /**
+     * Writes a top-level record the parser does not interpret, occupying exactly
+     * {@code totalBytes} of the file. Sliding everything after it by a chosen number
+     * of bytes is how a segmented-reader test puts a known record across a segment
+     * boundary without needing a dump the size of the segment.
+     */
+    public void padding(int totalBytes) {
+        if (totalBytes < 9) {
+            throw new IllegalArgumentException(
+                    "a record is at least 9 bytes of header, asked for " + totalBytes);
+        }
+        topLevel(HprofTag.CONTROL_SETTINGS, new byte[totalBytes - 9]);
+    }
+
+    /** Offset of the next heap sub-record, relative to the heap segment payload. */
+    public int heapMark() {
+        return heap.size();
+    }
+
+    /**
+     * Absolute file offset of the first heap sub-record byte. Valid only after
+     * {@link #build()}, since every {@code string(...)} written while assembling the
+     * heap section lands ahead of it in the file and moves it.
+     */
+    public int heapPayloadOffset() {
+        if (heapPayloadOffset < 0) {
+            throw new IllegalStateException("build() first; the offset is not known until then");
+        }
+        return heapPayloadOffset;
+    }
+
     // ---- assembly -----------------------------------------------------------
 
     public byte[] build() {
@@ -198,6 +230,9 @@ public final class HprofBuilder {
             d.write(body.toByteArray());
 
             byte[] heapBytes = heap.toByteArray();
+            // version + NUL + id size + timestamp, then the body, then this record's
+            // own tag/time/length header.
+            heapPayloadOffset = version.length() + 1 + 4 + 8 + body.size() + 9;
             if (heapBytes.length > 0) {
                 d.writeByte(HprofTag.HEAP_DUMP_SEGMENT);
                 d.writeInt(0);
