@@ -135,4 +135,85 @@ class LeakSuspectsTest {
         assertTrue(LeakSuspects.histogram(empty, 10).isEmpty());
         assertEquals(0L, empty.totalShallowSize());
     }
+
+    /**
+     * Several holders that retain exactly the same number of bytes, with object ids
+     * chosen so that the order a {@code HashMap} yields them is not ascending id
+     * order. Any ranking that relies on map iteration order will disagree with the
+     * ranking a reader would call correct.
+     */
+    private static Snapshot tiedDump() {
+        HprofBuilder b = new HprofBuilder();
+        b.loadClass(CLASS_OBJECT, "java/lang/Object");
+        b.classDump(CLASS_OBJECT, 0L, 0);
+        b.loadClass(10L, "com/example/Holder");
+        b.classDump(10L, 0L, 8, "payload", BasicType.OBJECT);
+
+        long[] holderIds = {20L, 5L, 36L, 17L};
+        long arrayId = 1000L;
+        for (long holderId : holderIds) {
+            b.instance(holderId, 10L, new BasicType[] {BasicType.OBJECT}, new long[] {arrayId});
+            b.primitiveArray(arrayId, BasicType.BYTE, 1024);
+            b.rootJavaFrame(holderId);
+            arrayId++;
+        }
+        return HprofParser.parse(b.build());
+    }
+
+    @Test
+    @DisplayName("suspects tied on retained size are ordered by object id, not by map iteration")
+    void tiedRetainedSizesAreOrderedByObjectId() {
+        Snapshot s = tiedDump();
+        DominatorTree d = DominatorTree.build(s);
+        List<LeakSuspects.Suspect> top = LeakSuspects.topByRetainedSize(s, d, 20);
+
+        // Every run of a leak hunt must print the same report for the same dump.
+        // Without a tie-break, equal retained sizes fall through to the order
+        // Snapshot's HashMap happens to yield, which is an implementation detail
+        // of the map and the JDK rather than anything about the heap.
+        long previousRetained = Long.MAX_VALUE;
+        long previousId = Long.MIN_VALUE;
+        for (LeakSuspects.Suspect suspect : top) {
+            if (suspect.retainedSize() == previousRetained) {
+                assertTrue(suspect.objectId() > previousId,
+                        "tied suspects must ascend by object id: saw " + previousId
+                                + " then " + suspect.objectId()
+                                + " at retained size " + suspect.retainedSize());
+            }
+            previousRetained = suspect.retainedSize();
+            previousId = suspect.objectId();
+        }
+    }
+
+    @Test
+    @DisplayName("the same dump produces a byte-identical ranking every time")
+    void rankingIsRepeatable() {
+        Snapshot s = tiedDump();
+        DominatorTree d = DominatorTree.build(s);
+        List<LeakSuspects.Suspect> first = LeakSuspects.topByRetainedSize(s, d, 20);
+        for (int run = 0; run < 5; run++) {
+            assertEquals(first, LeakSuspects.topByRetainedSize(s, d, 20),
+                    "ranking changed between runs on an unchanged snapshot");
+        }
+    }
+
+    @Test
+    @DisplayName("histogram rows tied on total bytes are ordered by class name")
+    void tiedHistogramRowsAreOrderedByClassName() {
+        Snapshot s = tiedDump();
+        List<LeakSuspects.ClassTotal> rows = LeakSuspects.histogram(s, 20);
+
+        long previousBytes = Long.MAX_VALUE;
+        String previousName = null;
+        for (LeakSuspects.ClassTotal row : rows) {
+            if (row.totalShallowSize() == previousBytes && previousName != null) {
+                assertTrue(row.className().compareTo(previousName) > 0,
+                        "tied histogram rows must ascend by class name: saw "
+                                + previousName + " then " + row.className());
+            }
+            previousBytes = row.totalShallowSize();
+            previousName = row.className();
+        }
+    }
+
 }
