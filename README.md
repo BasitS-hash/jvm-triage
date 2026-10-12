@@ -100,8 +100,18 @@ Exit codes: `0` analysed and clean, `1` deadlock found or dump unreadable, `2` u
 
 ## Scope and limits
 
-- Heap dumps are memory-mapped into a single buffer, so **dumps above 2 GiB are
-  rejected** rather than silently mis-read. Segmented reading is the obvious next step.
+- Heap dumps are memory-mapped as a list of 1 GiB segments, so there is no 2 GiB
+  file-size ceiling. Three caveats remain, and they are real:
+  - Mapping is still mapping. A 32 GiB dump needs 32 GiB of free *address space*,
+    which is fine on any 64-bit JVM and impossible on a 32-bit one.
+  - Nothing is read eagerly, but a full parse touches nearly every page, so the dump
+    is effectively pulled through the page cache once. On a box with little free
+    memory that means real I/O pressure, and the OS may evict other things to do it.
+  - A single `PRIMITIVE_ARRAY_DUMP` or `OBJECT_ARRAY_DUMP` whose payload exceeds one
+    segment is handled — reads that straddle a seam are assembled byte by byte — but
+    the `readBytes` path still materialises an `INSTANCE_DUMP` field block as one
+    `byte[]`, so an instance with more than 2 GiB of fields would be rejected. No JVM
+    emits one.
 - Class objects are treated as GC roots unconditionally. Strictly a class is only a
   root while its loader is reachable, but proving otherwise means modelling loader
   liveness, and guessing wrong would report live objects as collectable — much worse
@@ -125,7 +135,7 @@ Exit codes: `0` analysed and clean, `1` deadlock found or dump unreadable, `2` u
 
 ## Tests
 
-49 tests, 92% line / 82% branch coverage.
+53 tests, 93% line / 82% branch coverage.
 
 ```bash
 mvn test
@@ -136,6 +146,13 @@ graph is known exactly and retained sizes are asserted against numbers worked ou
 hand. Dominator tests use hand-built graphs — a diamond (proving the meet is right and
 the shared object is not double-counted), cycles, self-reference, multi-root sharing,
 and a 200,000-node chain that would overflow a recursive DFS.
+
+The segmented reader is tested at test-only segment sizes of 4 to 64 bytes, so a few
+hundred bytes of dump spans dozens of segments. One test slides the heap section
+through every byte alignment against a 16-byte boundary; another computes the padding
+that drops an 8-byte object id exactly four bytes either side of a seam, asserts it
+really straddles, and then asserts it reads back as itself. A segmented reader
+exercised only on files smaller than one segment is not tested at all.
 
 ## Attribution
 
