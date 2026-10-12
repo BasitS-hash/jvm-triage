@@ -4,7 +4,6 @@ import dev.basit.jvmtriage.heap.ClassInfo;
 import dev.basit.jvmtriage.heap.JavaObject;
 import dev.basit.jvmtriage.heap.Snapshot;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -45,15 +44,13 @@ public final class HprofParser {
     private record RawInstance(long id, long classId, byte[] fieldBlock) {}
 
     public static Snapshot parse(Path file) throws IOException {
+        return parse(file, HprofReader.DEFAULT_SEGMENT_BITS);
+    }
+
+    /** Parses with a non-default mapping segment size. For tests only. */
+    static Snapshot parse(Path file, int segmentBits) throws IOException {
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-            long size = channel.size();
-            if (size > Integer.MAX_VALUE) {
-                throw new HprofFormatException(
-                        "dump is " + size + " bytes; this build maps the file into a single "
-                                + "buffer and cannot exceed 2 GiB");
-            }
-            ByteBuffer mapped = channel.map(FileChannel.MapMode.READ_ONLY, 0, size);
-            return new HprofParser().parseBuffer(new HprofReader(mapped));
+            return new HprofParser().parseBuffer(HprofReader.mapped(channel, segmentBits));
         }
     }
 
@@ -155,7 +152,7 @@ public final class HprofParser {
                         "record 0x" + Integer.toHexString(tag) + " declares " + length
                                 + " bytes but only " + r.remaining() + " remain");
             }
-            int end = r.position() + (int) length;
+            long end = r.position() + length;
 
             switch (tag) {
                 case HprofTag.STRING_IN_UTF8 -> {
@@ -178,7 +175,7 @@ public final class HprofParser {
         }
     }
 
-    private void readHeapSegment(HprofReader r, int segmentEnd) {
+    private void readHeapSegment(HprofReader r, long segmentEnd) {
         while (r.position() < segmentEnd) {
             int sub = r.readU1();
             switch (sub) {
