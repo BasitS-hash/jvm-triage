@@ -116,6 +116,12 @@ Exit codes: `0` analysed and clean, `1` deadlock found or dump unreadable, `2` u
   root while its loader is reachable, but proving otherwise means modelling loader
   liveness, and guessing wrong would report live objects as collectable — much worse
   in a leak hunt than carrying a few unloadable classes.
+- Reports are deterministic. Retained sizes tie constantly — a holder and the one
+  collection it holds retain identical bytes — so ranking breaks ties on object id,
+  and the class histogram breaks them on class name. Without that, order came from
+  `HashMap` iteration, which is a property of the map rather than of the heap: the
+  same dump could rank two ways and a reader would have no way to tell which report
+  to trust.
 - Thread-dump parsing is deliberately tolerant. Unrecognised lines are skipped rather
   than rejected, because dumps arrive truncated by log rotation or pasted out of
   tickets, and refusing to parse one is worse than parsing what is there.
@@ -129,7 +135,7 @@ Exit codes: `0` analysed and clean, `1` deadlock found or dump unreadable, `2` u
 
 ## Tests
 
-50 tests, 93% line / 82% branch coverage.
+53 tests, 93% line / 82% branch coverage.
 
 ```bash
 mvn test

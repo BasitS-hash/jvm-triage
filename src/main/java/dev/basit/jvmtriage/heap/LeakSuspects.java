@@ -52,7 +52,14 @@ public final class LeakSuspects {
                     obj.id(), snapshot.classNameOf(obj), obj.shallowSize(), retained, pct));
         }
 
-        suspects.sort(Comparator.comparingLong(Suspect::retainedSize).reversed());
+        // Object id breaks ties. Retained sizes collide constantly — a holder and the
+        // single collection it holds retain exactly the same bytes — and without a
+        // second key the order falls through to however Snapshot's HashMap happens to
+        // yield its values. That is a property of the map, not of the heap, so the
+        // same dump could rank differently and a reader would have no way to tell
+        // which report to trust.
+        suspects.sort(Comparator.comparingLong(Suspect::retainedSize).reversed()
+                .thenComparingLong(Suspect::objectId));
         return suspects.size() <= limit ? suspects : new ArrayList<>(suspects.subList(0, limit));
     }
 
@@ -71,7 +78,8 @@ public final class LeakSuspects {
         for (Map.Entry<String, long[]> e : byClass.entrySet()) {
             totals.add(new ClassTotal(e.getKey(), e.getValue()[0], e.getValue()[1]));
         }
-        totals.sort(Comparator.comparingLong(ClassTotal::totalShallowSize).reversed());
+        totals.sort(Comparator.comparingLong(ClassTotal::totalShallowSize).reversed()
+                .thenComparing(ClassTotal::className));
         return totals.size() <= limit ? totals : new ArrayList<>(totals.subList(0, limit));
     }
 
