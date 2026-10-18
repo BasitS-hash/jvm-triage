@@ -16,6 +16,14 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>5.11.3</junit.version>
+    <!--
+      Tests tagged "large" build a multi-gibibyte fixture on disk. They are skipped by
+      default so `mvn test` stays a one-second command, and enabled by -Plarge-dumps.
+      A tag plus a profile rather than an @EnabledIfSystemProperty: the exclusion is
+      visible in the build file, so nobody has to read the test to find out why it never
+      ran, and CI opts in by naming the profile rather than by knowing a property.
+    -->
+    <excludedTestGroups>large</excludedTestGroups>
   </properties>
 
   <dependencies>
@@ -33,6 +41,9 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.5.2</version>
+        <configuration>
+          <excludedGroups>${excludedTestGroups}</excludedGroups>
+        </configuration>
       </plugin>
 
       <plugin>
@@ -83,4 +94,18 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!--
+      Runs the whole suite including the tests tagged "large". Needs several GiB of free
+      space under the temp directory; the tests check and skip themselves if it is not
+      there. CI runs this as a separate job.
+    -->
+    <profile>
+      <id>large-dumps</id>
+      <properties>
+        <excludedTestGroups/>
+      </properties>
+    </profile>
+  </profiles>
 </project>

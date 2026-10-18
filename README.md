@@ -101,7 +101,8 @@ Exit codes: `0` analysed and clean, `1` deadlock found or dump unreadable, `2` u
 ## Scope and limits
 
 - Heap dumps are memory-mapped as a list of 1 GiB segments, so there is no 2 GiB
-  file-size ceiling. Three caveats remain, and they are real:
+  file-size ceiling, and a test now parses a 3.25 GiB dump and checks the report object
+  by object (see [Tests](#tests)). Four caveats remain, and they are real:
   - Mapping is still mapping. A 32 GiB dump needs 32 GiB of free *address space*,
     which is fine on any 64-bit JVM and impossible on a 32-bit one.
   - Nothing is read eagerly, but a full parse touches nearly every page, so the dump
@@ -112,6 +113,17 @@ Exit codes: `0` analysed and clean, `1` deadlock found or dump unreadable, `2` u
     the `readBytes` path still materialises an `INSTANCE_DUMP` field block as one
     `byte[]`, so an instance with more than 2 GiB of fields would be rejected. No JVM
     emits one.
+  - **The binding limit is no longer the file — it is this process's own heap.** The
+    object model does not stream: every object becomes a map entry and a `JavaObject`,
+    and the dominator tree then builds five parallel arrays, a second map, and a
+    successor and predecessor list per node. Measured on one dump from a real JVM: 322
+    MiB of HPROF holding 8.03M objects needs about 2.1 GiB of heap — it dies with
+    `OutOfMemoryError` at 2 GiB — and takes 30 seconds. That is roughly 6-7× the file's
+    size and ~270 bytes per object, and the per-object cost rises with the number of
+    references, so a denser graph costs more. Scaled up, a 4 GiB dump wants something
+    near 25 GiB of heap. The reader will walk a 32 GiB file; building the object model
+    for one will not fit on a machine you are likely to be sitting at. Give the JVM
+    `-Xmx` well above the dump's size and expect minutes.
 - Class objects are treated as GC roots unconditionally. Strictly a class is only a
   root while its loader is reachable, but proving otherwise means modelling loader
   liveness, and guessing wrong would report live objects as collectable — much worse
@@ -135,11 +147,16 @@ Exit codes: `0` analysed and clean, `1` deadlock found or dump unreadable, `2` u
 
 ## Tests
 
-53 tests, 93% line / 82% branch coverage.
+54 tests, 93% line / 82% branch coverage.
 
 ```bash
-mvn test
+mvn test                  # 53 tests, about a second
+mvn -Plarge-dumps test    # all 54 — the extra one writes a 3.25 GiB fixture
 ```
+
+The 54th is tagged `large` and excluded by default, because it builds a multi-gibibyte
+file and `mvn test` should stay a one-second command. CI runs it as its own job, and that
+job fails if the test skipped itself: a gated test nobody executes is worth nothing.
 
 Parser tests build HPROF dumps byte by byte with a test-only writer, so the object
 graph is known exactly and retained sizes are asserted against numbers worked out by
@@ -153,6 +170,36 @@ through every byte alignment against a 16-byte boundary; another computes the pa
 that drops an 8-byte object id exactly four bytes either side of a seam, asserts it
 really straddles, and then asserts it reads back as itself. A segmented reader
 exercised only on files smaller than one segment is not tested at all.
+
+### Above 2 GiB
+
+Removing the 2 GiB ceiling was the point of the segmented reader, and for a while nothing
+executed the path above it. The argument that it worked was sound — every offset is a
+`long`, the seams are tested at 4-64 byte segments, a real dump ran at 64 KiB segments —
+but an argument is not a test, and the failure it does not rule out is the bad one. A
+truncated or sign-extended offset need not crash; it can read a plausible identifier from
+the wrong place and name the wrong object, and a leak hunt pointed at the wrong object at
+2am is worse than one that refuses to start.
+
+So the fixture puts three holders and their `byte[]` payloads below, across and well above
+the boundary, makes the straddling one the largest retainer, and lands its payload
+identifier on file offset `0x7ffffffc` — four bytes either side of `Integer.MAX_VALUE`,
+which at the production segment size of 1 GiB is also exactly a mapping seam, so the value
+goes through the hand-rolled straddling path. Then it asserts the whole report: six
+suspects in one order, each by object id, class name and retained size. Narrowing the
+reader's cursor back to `int`, the way it was before the segmented reader landed, leaves
+all 53 other tests green and fails only this one.
+
+Most of the fixture is holes. Array payloads and the one padding record are never read —
+the parser steps over an array body by advancing its position, and resynchronises on each
+record's declared length — so the file is written sparse: 3.25 GiB long, a few kibibytes
+on disk, single-digit milliseconds to write and under 25 ms to parse. That is also the
+limit of what it proves. It proves the offset arithmetic above 2 GiB; it says nothing
+about a dump with millions of objects in it, which is the memory limit measured under
+[Scope and limits](#scope-and-limits) above.
+
+It adds no line coverage either: the same lines run, at different offsets. That is
+precisely why a line-coverage number was never going to catch this.
 
 ## Attribution
 

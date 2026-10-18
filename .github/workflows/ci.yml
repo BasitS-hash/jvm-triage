@@ -76,3 +76,42 @@ jobs:
           grep -q "byte\[\]" /tmp/e2e/out.txt \
             || { echo "FAIL: primitive arrays not named"; exit 1; }
           java -jar target/jvm-triage.jar threads /tmp/e2e/threads.txt
+
+  large-dump:
+    name: Dump larger than 2 GiB
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      - name: Free space before
+        run: df -h /tmp "$GITHUB_WORKSPACE"
+
+      # Its own job rather than a step in the matrix: the fixture is 3.25 GiB of file and
+      # the build above must stay a fast gate on every push. One JDK is enough — this
+      # tests offset arithmetic, not anything version-specific.
+      - name: Run the >2 GiB test
+        run: |
+          set -euo pipefail
+          mvn -B --no-transfer-progress -Plarge-dumps test | tee /tmp/large-dump.log
+
+      # The test skips itself when the filesystem looks too small for a non-sparse
+      # fixture. That is the right call on a laptop and the wrong outcome here: a gated
+      # test that silently never runs is worth nothing, so a skip fails this job.
+      - name: Confirm it ran, and print the measurements
+        run: |
+          set -euo pipefail
+          report=target/surefire-reports/dev.basit.jvmtriage.hprof.AboveTwoGibibytesTest.txt
+          grep -q "Tests run: 1, Failures: 0, Errors: 0, Skipped: 0" "$report" \
+            || { cat "$report"; echo "FAIL: the >2 GiB test did not run"; exit 1; }
+          grep "\[above-2GiB\]" /tmp/large-dump.log
+
+      - name: Free space after
+        if: always()
+        run: df -h /tmp "$GITHUB_WORKSPACE"
